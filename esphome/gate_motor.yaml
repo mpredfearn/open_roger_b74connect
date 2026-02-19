@@ -1,0 +1,142 @@
+################################################################################
+#  gate_motor.yaml
+#  ESPHome config for Roger Technology Brushless gate motor controller
+#
+#  Replaces the Roger Technology B74/BConnect WiFi module with an ESP32,
+#  communicating over the same TTL serial Modbus RTU interface that the
+#  B74/BConnect uses to talk to the digital controller.
+#
+#  Compatible controllers: B70/1DC, B70/1DCHP, B70/2ML, EDGE1, CTRL, CTRL/P
+#  Protocol reverse-engineered from B74/BConnect serial traffic captures.
+#
+#  Hardware: connect the ESP32 to the B74/BConnect serial port on the controller
+#    GPIO16 (UART2 RX) → Controller serial TX
+#    GPIO17 (UART2 TX) → Controller serial RX
+#    GND               → Controller GND
+#
+#  Hardware: connect the ESP8266 to the B74/BConnect serial port on the controller
+#    GPIO3 (RX) → Controller serial TX
+#    GPIO1 (TX) → Controller serial RX
+#    GND               → Controller GND
+#
+#  Before deploying:
+#    1. Set your WiFi credentials in secrets.yaml
+################################################################################
+
+esphome:
+  name: gate-motor
+  friendly_name: "Driveway Gate"
+
+esp8266:
+  board: d1_mini
+
+# Load the custom component from the local components folder
+external_components:
+  - source:
+      type: local
+      path: components
+
+#  - source: github://oxan/esphome-stream-server
+
+logger:
+  level: DEBUG
+  baud_rate: 0    # Disables serial logging to free UART0 for gate comms
+                  # Logs are still available over WiFi via the ESPHome dashboard
+
+api:
+  encryption:
+    key: !secret api_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "Gate Motor Fallback"
+    password: "changeme123"
+
+web_server:
+
+captive_portal:
+
+# ── UART for RS485 ──────────────────────────────────────────────────────────
+uart:
+  id: uart_rs485
+  tx_pin: GPIO1     # UART0 TX — shared with USB serial, safe once baud_rate: 0 is set
+  rx_pin: GPIO3     # UART0 RX
+  baud_rate: 115200
+  parity: NONE
+  stop_bits: 1
+  data_bits: 8
+
+#stream_server:
+#  - uart_id: uart_rs485
+#    port: 10001
+
+# ── Gate cover entity ───────────────────────────────────────────────────────
+cover:
+  - platform: gate_motor
+    id: driveway_gate
+    name: "Driveway Gate"
+    uart_id: uart_rs485
+
+    # How often to poll the motor controller (milliseconds)
+    poll_interval: 500ms
+
+    # Optional Home Assistant entity tweaks
+    device_class: gate
+    icon: "mdi:gate"
+
+# ── Scripts ──────────────────────────────────────────────────────────────────
+script:
+  - id: pedestrian_open
+    mode: single                   # Ignore button if already running
+    then:
+      # If the gate is not already closed, close it first and wait
+      - if:
+          condition:
+            lambda: 'return id(driveway_gate).position > 0.05;'
+          then:
+            - cover.close: driveway_gate
+            - wait_until:
+                condition:
+                  lambda: 'return id(driveway_gate).current_operation == CoverOperation::COVER_OPERATION_IDLE
+                               && id(driveway_gate).position <= 0.05;'
+                timeout: 30s
+      # Now send the pedestrian open command
+      - cover.control:
+          id: driveway_gate
+          position: 0.5
+
+# ── Buttons ─────────────────────────────────────────────────────────────────
+button:
+  - platform: template
+    name: "Pedestrian Open"
+    icon: "mdi:walk"
+    on_press:
+      - script.execute: pedestrian_open
+
+# ── Optional diagnostics sensors ───────────────────────────────────────────
+# Uncomment to expose raw status bytes in HA for debugging / calibration
+
+# sensor:
+#   - platform: template
+#     name: "Gate Raw Motion State"
+#     id: gate_motion_raw
+#     accuracy_decimals: 0
+#     update_interval: never
+#
+#   - platform: template
+#     name: "Gate Raw Position Ticks"
+#     id: gate_position_ticks
+#     accuracy_decimals: 0
+#     update_interval: never
+
+# ── Status LED (optional) ───────────────────────────────────────────────────
+status_led:
+  pin:
+    number: GPIO2   # D1 Mini built-in LED
+    inverted: true
